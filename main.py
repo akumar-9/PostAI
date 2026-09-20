@@ -1,67 +1,54 @@
-from langchain_google_genai import GoogleGenerativeAI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableParallel
+import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Initialize the Google Generative AI model
-# Make sure to set the GOOGLE_API_KEY in your environment or .env file
-llm = GoogleGenerativeAI(model="gemini-2.0-flash")
+app = FastAPI()
 
-linkedin_template = ChatPromptTemplate.from_messages([
-    ("system", "Write only one formal LinkedIn post about the provided content. Make it professional and career-focused."),
-    ("user", "{content}")])
+# Enable CORS for your React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Change this to your frontend URL in production
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-facebook_template = ChatPromptTemplate.from_messages([
-    ("system", "Write only one informal Facebook post about the provided content. Make it fun, personal, and friendly."),
-    ("user", "{content}")])
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
+output_parser = StrOutputParser()
 
-twitter_template = ChatPromptTemplate.from_messages([
-    ("system", "Write only one concise, engaging Twitter post about the provided content. Keep it under 280 characters."),
-    ("user", "{content}")])
+# We instruct the model to avoid markdown for clean copy-pasting
+system_instruction = "Do not use markdown formatting like asterisks, bolding, or headers. Provide plain text with appropriate emojis."
 
-blog_template = ChatPromptTemplate.from_messages([
-    ("system", "Write only one detailed blog post about the provided content. Be informative and provide context, challenges, and lessons learned."),
-    ("user", "{content}")])
+templates = {
+    "linkedin": ChatPromptTemplate.from_messages([("system", f"{system_instruction} Write a formal LinkedIn post. Tone: {{tone}}. Audience: {{audience}}."), ("user", "{content}")]),
+    "twitter": ChatPromptTemplate.from_messages([("system", f"{system_instruction} Write a concise Twitter post under 280 characters. Tone: {{tone}}. Audience: {{audience}}."), ("user", "{content}")]),
+    "facebook": ChatPromptTemplate.from_messages([("system", f"{system_instruction} Write a friendly Facebook post. Tone: {{tone}}. Audience: {{audience}}."), ("user", "{content}")]),
+}
 
-linkedin_chain = linkedin_template | llm
-facebook_chain = facebook_template | llm
-twitter_chain = twitter_template | llm
-blog_chain = blog_template | llm
+chains = {key: template | llm | output_parser for key, template in templates.items()}
+all_chains = RunnableParallel(**chains)
 
-def generate_posts(content):
-    """
-    Generate posts for LinkedIn, Facebook, Twitter, and a blog based on the provided content.
-    
-    Args:
-        content (str): The content to generate posts from.
-    
-    Returns:
-        dict: A dictionary containing the generated posts for each platform.
-    """
-    linkedin_post = linkedin_chain.invoke({"content": content})
-    facebook_post = facebook_chain.invoke({"content": content})
-    twitter_post = twitter_chain.invoke({"content": content})
-    blog_post = blog_chain.invoke({"content": content})
+class PostRequest(BaseModel):
+    content: str
+    tone: str = "Professional"
+    audience: str = "General"
 
-    return {
-        "linkedin": linkedin_post,
-        "facebook": facebook_post,
-        "twitter":  twitter_post,
-        "blog":     blog_post
-    }
-
-
-# Example usage
-event_content = "I just completed a marathon and it was an amazing experience!"
-posts = generate_posts(event_content)
-print("Generated Posts:")
-print("LinkedIn: \n\n", posts["linkedin"])
-print("Facebook: \n\n", posts["facebook"])
-print("Twitter: \n\n", posts["twitter"])
-print("Blog: \n\n", posts["blog"])
-
-
-
-
+@app.post("/generate")
+async def generate_posts(request: PostRequest):
+    try:
+        # Run LangChain concurrently
+        results = await all_chains.ainvoke({
+            "content": request.content,
+            "tone": request.tone,
+            "audience": request.audience
+        })
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
